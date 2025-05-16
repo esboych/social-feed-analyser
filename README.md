@@ -1,4 +1,4 @@
-# Twitter Sentiment Analysis System
+# Social Sentiment Analysis System
 
 A hybrid system for monitoring Twitter sentiment about cryptocurrencies, combining fixed logic components with AI-powered sentiment analysis.
 
