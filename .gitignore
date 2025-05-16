@@ -1,4 +1,4 @@
-*.css
+*.csv
 .env
 .idea
 *.zip
