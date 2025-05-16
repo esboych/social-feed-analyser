@@ -1,5 +1,5 @@
-.css
+*.css
 .env
 .idea
-.zip
+*.zip
 __pycache__/
