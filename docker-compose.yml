@@ -1,0 +1,29 @@
+version: '3.4'
+services:
+  weaviate:
+    image: semitechnologies/weaviate:latest
+    restart: always
+    ports:
+      - "8080:8080"
+      - "50051:50051"
+    environment:
+      QUERY_DEFAULTS_LIMIT: 25
+      AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED: 'true'
+      PERSISTENCE_DATA_PATH: "./weaviate_data"
+      ENABLE_MODULES: 'text2vec-openai'
+      DEFAULT_VECTORIZER_MODULE: text2vec-openai
+      OPENAI_APIKEY: ${OPENAI_API_KEY}
+      ENABLE_GRAPHQL: 'true'
+      ORIGIN: "*"
+      ALLOW_ORIGIN: "*"
+    volumes:
+      - ./weaviate_data:/var/lib/weaviate
+
+  # Console UI with host network mode
+  weaviate-console:
+    image: semitechnologies/weaviate-console:latest
+    network_mode: "host"  # Use host network
+    depends_on:
+      - weaviate
+    environment:
+      WEAVIATE_URL: "http://localhost:8080"  # Use localhost with host networking
