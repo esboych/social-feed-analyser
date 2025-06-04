@@ -192,16 +192,24 @@ def main():
         # Use placeholder sentiment
         placeholder_sentiment = "neutral"
         
-        stored_count = 0
-        for tweet in all_tweets:
-            success = storage.store_tweet(tweet, placeholder_sentiment)
-            if success:
-                stored_count += 1
+        # Prepare analyzed tweets format (tweet_data, sentiment) tuples
+        analyzed_tweets = [(tweet, placeholder_sentiment) for tweet in all_tweets]
         
-        logger.info(f"Stored {stored_count}/{len(all_tweets)} tweets with placeholder sentiment '{placeholder_sentiment}'")
+        # Use the new batch storage method
+        stats = storage.store_tweets_batch(analyzed_tweets)
+        
+        # Report results
+        if stats["new_tweets"] > 0:
+            logger.info(f"Successfully stored {stats['new_tweets']} new tweets")
+        
+        if stats["existing_tweets"] > 0:
+            logger.info(f"Skipped {stats['existing_tweets']} tweets that were already processed")
+        
+        if stats["errors"] > 0:
+            logger.warning(f"{stats['errors']} tweets failed to store due to errors")
         
         # Verify storage by querying some tweets
-        if stored_count > 0:
+        if stats["new_tweets"] > 0 or stats["existing_tweets"] > 0:
             logger.info("Verifying storage by querying some tweets...")
             for keyword in keywords:
                 results = storage.get_latest_sentiments(keyword, count=5)

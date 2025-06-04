@@ -51,20 +51,33 @@ class ScheduleManager:
             tweets = self.monitor.process_accounts()
             
             if not tweets:
-                self.logger.info("No new tweets found")
+                self.logger.info("No tweets found from monitored accounts")
                 return
+            
+            self.logger.info(f"Found {len(tweets)} tweets to analyze")
             
             # Analyze sentiments
             analyzed_tweets = self.analyzer.analyze_batch(tweets)
             
-            # Store results
-            stored_count = 0
-            for tweet, sentiment in analyzed_tweets:
-                success = self.storage.store_tweet(tweet, sentiment)
-                if success:
-                    stored_count += 1
+            # Store results with improved reporting
+            stats = self.storage.store_tweets_batch(analyzed_tweets)
             
-            self.logger.info(f"Stored {stored_count} tweets with sentiment analysis")
+            # Report results based on what actually happened
+            if stats["new_tweets"] == 0 and stats["existing_tweets"] > 0:
+                self.logger.info(
+                    f"No new tweets to process - all {stats['existing_tweets']} tweets already analyzed"
+                )
+            elif stats["new_tweets"] > 0:
+                self.logger.info(
+                    f"Successfully processed {stats['new_tweets']} new tweets for sentiment analysis"
+                )
+                
+                # If we have errors, log them separately
+                if stats["errors"] > 0:
+                    self.logger.warning(f"{stats['errors']} tweets failed to store due to errors")
+            
+            elif stats["errors"] > 0:
+                self.logger.error(f"All {stats['errors']} tweets failed to store")
             
         except Exception as e:
             self.logger.error(f"Error in monitoring job: {e}")
@@ -74,13 +87,14 @@ class ScheduleManager:
     def _notification_check_job(self):
         """Job to check sentiment thresholds and send notifications."""
         try:
-            self.logger.info("Checking sentiment thresholds")
+            self.logger.debug("Checking sentiment thresholds")
             
             for keyword in self.keywords:
                 # Get latest sentiments
                 latest_sentiments = self.storage.get_latest_sentiments(keyword, count=10)
                 
                 if not latest_sentiments:
+                    self.logger.debug(f"No recent tweets found containing '{keyword}'")
                     continue
                 
                 # Check threshold
@@ -94,7 +108,16 @@ class ScheduleManager:
                         f"Consider potential investment opportunities."
                     )
                     
-                    self.notifier.send_notification(message, keyword)
+                    success = self.notifier.send_notification(message, keyword)
+                    if success:
+                        self.logger.info(f"Sent positive sentiment notification for {keyword}")
+                    else:
+                        self.logger.warning(f"Failed to send notification for {keyword}")
+                else:
+                    self.logger.debug(
+                        f"Sentiment threshold not met for {keyword}: "
+                        f"{result.get('positive_count', 0)}/{result.get('total_count', 0)} positive"
+                    )
         
         except Exception as e:
             self.logger.error(f"Error in notification check job: {e}")

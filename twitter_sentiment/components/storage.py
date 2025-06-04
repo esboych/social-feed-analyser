@@ -1,8 +1,9 @@
 import logging
 import uuid
-from datetime import datetime
-from typing import Dict, List, Optional
 import re
+import traceback
+from datetime import datetime, timezone
+from typing import Dict, List, Optional, Tuple
 
 import weaviate
 
@@ -138,9 +139,9 @@ class WeaviateStorage:
         except Exception as e:
             self.logger.warning(f"Error converting timestamp '{timestamp}': {e}")
             # Return current time as fallback
-            return datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ")
+            return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     
-    def store_tweet(self, tweet_data: Dict, sentiment: str) -> bool:
+    def store_tweet(self, tweet_data: Dict, sentiment: str) -> str:
         """Store a tweet with its sentiment analysis in Weaviate.
         
         Args:
@@ -148,7 +149,9 @@ class WeaviateStorage:
             sentiment: Sentiment classification
             
         Returns:
-            True if storage was successful, False otherwise
+            "new" if tweet was stored successfully (new tweet)
+            "existing" if tweet already exists (skipped)
+            "error" if storage failed due to error
         """
         try:
             tweet_id = tweet_data.get("id")
@@ -173,7 +176,7 @@ class WeaviateStorage:
             retweet_count = int(tweet_data.get("retweetCount", 0))
             like_count = int(tweet_data.get("likeCount", 0))
             
-            # Create UUID based on tweet ID for deduplication
+            # Create deterministic UUID based on tweet ID for deduplication
             tweet_uuid = uuid.uuid5(uuid.NAMESPACE_URL, f"twitter:{tweet_id}")
             
             properties = {
@@ -188,16 +191,67 @@ class WeaviateStorage:
                 "like_count": like_count
             }
             
-            self.client.data_object.create(
-                class_name="TweetSentiment",
-                data_object=properties,
-                uuid=str(tweet_uuid)
-            )
-            return True
+            try:
+                self.client.data_object.create(
+                    class_name="TweetSentiment",
+                    data_object=properties,
+                    uuid=str(tweet_uuid)
+                )
+                self.logger.debug(f"Stored new tweet: {tweet_id} from @{username}")
+                return "new"
+                
+            except weaviate.exceptions.ObjectAlreadyExistsException:
+                # This is expected behavior when tweet already exists
+                self.logger.debug(f"Tweet {tweet_id} already processed, skipping")
+                return "existing"
+                
+            except Exception as e:
+                # This is an actual storage error
+                self.logger.error(f"Error storing tweet {tweet_id}: {str(e)}")
+                if self.logger.isEnabledFor(logging.DEBUG):
+                    self.logger.debug(f"Stack trace: {traceback.format_exc()}")
+                    self.logger.debug(f"Attempted to store properties: {properties}")
+                return "error"
             
         except Exception as e:
-            self.logger.error(f"Error storing tweet {tweet_data.get('id', 'unknown')}: {e}")
-            return False
+            self.logger.error(f"Error preparing tweet {tweet_data.get('id', 'unknown')}: {e}")
+            return "error"
+    
+    def store_tweets_batch(self, analyzed_tweets: List[Tuple[Dict, str]]) -> Dict[str, int]:
+        """Store a batch of analyzed tweets and return detailed statistics.
+        
+        Args:
+            analyzed_tweets: List of (tweet_data, sentiment) tuples
+            
+        Returns:
+            Dictionary with storage statistics
+        """
+        stats = {
+            "new_tweets": 0,
+            "existing_tweets": 0,
+            "errors": 0,
+            "total_processed": len(analyzed_tweets)
+        }
+        
+        for tweet_data, sentiment in analyzed_tweets:
+            result = self.store_tweet(tweet_data, sentiment)
+            
+            if result == "new":
+                stats["new_tweets"] += 1
+            elif result == "existing":
+                stats["existing_tweets"] += 1
+            else:  # "error"
+                stats["errors"] += 1
+        
+        # Log summary
+        if stats["total_processed"] > 0:
+            self.logger.info(
+                f"Storage batch complete: {stats['new_tweets']} new, "
+                f"{stats['existing_tweets']} already existed, "
+                f"{stats['errors']} errors out of {stats['total_processed']} total"
+            )
+        
+        return stats
     
     def query_sentiment_trends(self, keyword: str, timeframe_hours: int = 24) -> Dict:
         """Query sentiment trends for a specific keyword.
@@ -212,49 +266,40 @@ class WeaviateStorage:
         try:
             # Get timestamp for timeframe hours ago
             time_ago = (
-                datetime.now()
-                .timestamp() - (timeframe_hours * 3600)
+                datetime.now(timezone.utc).timestamp() - (timeframe_hours * 3600)
             )
-            time_str = datetime.fromtimestamp(time_ago).strftime("%Y-%m-%dT%H:%M:%SZ")
+            time_str = datetime.fromtimestamp(time_ago, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             
-            # Build GraphQL query
-            query = """
-            {
-              Get {
-                TweetSentiment(
-                  where: {
-                    operator: And,
-                    operands: [
-                      { path: ["tweet_text"], operator: Like, valueText: $keyword },
-                      { path: ["timestamp"], operator: GreaterThanEqual, valueDate: $timestamp }
+            # Use newer Weaviate client API
+            result = (
+                self.client.query
+                .get("TweetSentiment", ["sentiment", "tweet_text", "timestamp"])
+                .with_where({
+                    "operator": "And",
+                    "operands": [
+                        {
+                            "path": ["tweet_text"],
+                            "operator": "Like",
+                            "valueText": f"*{keyword}*"
+                        },
+                        {
+                            "path": ["timestamp"],
+                            "operator": "GreaterThanEqual",
+                            "valueDate": time_str
+                        }
                     ]
-                  }
-                ) {
-                  sentiment
-                  tweet_text
-                  timestamp
-                  source
-                  author_username
-                  retweet_count
-                  like_count
-                }
-              }
-            }
-            """
-            
-            # Execute query
-            result = self.client.query.raw(
-                query,
-                {"keyword": f"*{keyword}*", "timestamp": time_str}
+                })
+                .do()
             )
             
-            tweets = result["data"]["Get"]["TweetSentiment"]
+            tweets = result.get("data", {}).get("Get", {}).get("TweetSentiment", [])
             
             # Count sentiments
             sentiments = {"positive": 0, "neutral": 0, "negative": 0}
             for tweet in tweets:
                 sentiment = tweet.get("sentiment", "neutral")
-                sentiments[sentiment] += 1
+                if sentiment in sentiments:
+                    sentiments[sentiment] += 1
             
             return {
                 "total": len(tweets),
@@ -276,36 +321,26 @@ class WeaviateStorage:
             List of tweet sentiment objects
         """
         try:
-            query = """
-            {
-              Get {
-                TweetSentiment(
-                  where: {
-                    path: ["tweet_text"],
-                    operator: Like,
-                    valueText: $keyword
-                  }
-                  limit: $count
-                  sort: [{ path: ["timestamp"], order: desc }]
-                ) {
-                  sentiment
-                  tweet_text
-                  timestamp
-                  source
-                  author_username
-                  retweet_count
-                  like_count
-                }
-              }
-            }
-            """
-            
-            result = self.client.query.raw(
-                query,
-                {"keyword": f"*{keyword}*", "count": count}
+            # Use the newer Weaviate client API
+            result = (
+                self.client.query
+                .get("TweetSentiment", [
+                    "sentiment", "tweet_text", "timestamp", "source", 
+                    "author_username", "retweet_count", "like_count"
+                ])
+                .with_where({
+                    "path": ["tweet_text"],
+                    "operator": "Like",
+                    "valueText": f"*{keyword}*"
+                })
+                .with_limit(count)
+                .with_sort([{"path": ["timestamp"], "order": "desc"}])
+                .do()
             )
             
-            return result["data"]["Get"]["TweetSentiment"]
+            tweets = result.get("data", {}).get("Get", {}).get("TweetSentiment", [])
+            return tweets
+            
         except Exception as e:
             self.logger.error(f"Error getting latest sentiments: {e}")
             return []
