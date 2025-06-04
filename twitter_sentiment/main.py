@@ -10,7 +10,6 @@ from twitter_sentiment.components.monitor import TwitterMonitor
 from twitter_sentiment.components.notifier import NotificationService
 from twitter_sentiment.components.scheduler import ScheduleManager
 from twitter_sentiment.components.storage import WeaviateStorage
-from twitter_sentiment.config import settings
 from twitter_sentiment.utils.csv_loader import load_twitter_accounts
 
 
@@ -32,6 +31,29 @@ def setup_logging(log_level=logging.INFO):
     )
 
 
+# Load settings directly since config.py has pydantic issues
+def load_settings():
+    """Load settings from environment variables."""
+    from dotenv import load_dotenv
+    load_dotenv()
+    
+    settings = {
+        'twitterapi_key': os.getenv('TWITTERAPI_KEY'),
+        'openai_api_key': os.getenv('OPENAI_API_KEY'),
+        'openai_model': os.getenv('OPENAI_MODEL', 'gpt-3.5-turbo-instruct'),
+        'weaviate_url': os.getenv('WEAVIATE_URL', 'http://localhost:8080'),
+        'telegram_token': os.getenv('TELEGRAM_TOKEN'),
+        'telegram_chat_id': os.getenv('TELEGRAM_CHAT_ID'),
+        'notification_method': os.getenv('NOTIFICATION_METHOD', 'console'),
+        'monitoring_interval': int(os.getenv('MONITORING_INTERVAL', 300)),
+        'sentiment_threshold': int(os.getenv('SENTIMENT_THRESHOLD', 7)),
+        'target_keywords': os.getenv('TARGET_KEYWORDS', 'BTC,ETH,SOL').split(','),
+        'accounts_file': os.getenv('ACCOUNTS_FILE', 'accounts.csv')
+    }
+    
+    return settings
+
+
 def main():
     """Main application entry point."""
     # Parse command line arguments
@@ -50,31 +72,29 @@ def main():
     
     logger = logging.getLogger(__name__)
     
-    # Load alternate config if specified
-    if args.config:
-        os.environ["DOTENV_FILE"] = args.config
-        from importlib import reload
-        from twitter_sentiment import config
-        reload(config)
+    # Load settings
+    settings = load_settings()
     
     # Process command
     if args.command == "test_twitter":
         # Test Twitter API
         monitor = TwitterMonitor(
-            api_key=settings.twitterapi_key,
+            api_key=settings['twitterapi_key'],
             accounts=["elonmusk", "VitalikButerin"],  # Test with known accounts
-            crypto_keywords=settings.target_keywords
+            crypto_keywords=settings['target_keywords']
         )
         tweets = monitor.process_accounts()
         logger.info(f"Found {len(tweets)} tweets")
         for tweet in tweets[:5]:  # Show first 5
-            logger.info(f"Tweet from {tweet.get('author', {}).get('username')}: {tweet.get('text')[:50]}...")
+            author = tweet.get('author', {})
+            username = author.get('userName', author.get('username', 'unknown'))
+            logger.info(f"Tweet from @{username}: {tweet.get('text')[:50]}...")
     
     elif args.command == "test_sentiment":
         # Test sentiment analysis
         analyzer = SentimentAnalyzer(
-            openai_api_key=settings.openai_api_key,
-            model=settings.openai_model
+            openai_api_key=settings['openai_api_key'],
+            model=settings['openai_model']
         )
         
         # Use provided parameter or default test tweets
@@ -96,24 +116,24 @@ def main():
     elif args.command == "test_weaviate":
         # Test Weaviate storage
         storage = WeaviateStorage(
-            weaviate_url=settings.weaviate_url,
-            openai_api_key=settings.openai_api_key
+            weaviate_url=settings['weaviate_url'],
+            openai_api_key=settings['openai_api_key']
         )
         
         # Check schema
         storage.ensure_schema_exists()
         
         # Test query
-        for keyword in settings.target_keywords:
+        for keyword in settings['target_keywords']:
             trends = storage.query_sentiment_trends(keyword, timeframe_hours=24)
             logger.info(f"Sentiment trends for {keyword}: {trends}")
     
     elif args.command == "test_notify":
         # Test notification
         notifier = NotificationService(
-            telegram_token=settings.telegram_token,
-            telegram_chat_id=settings.telegram_chat_id,
-            notification_method=settings.notification_method
+            telegram_token=settings['telegram_token'],
+            telegram_chat_id=settings['telegram_chat_id'],
+            notification_method=settings['notification_method']
         )
         
         message = args.param or "This is a test notification from the Twitter Sentiment Analysis system."
@@ -125,32 +145,32 @@ def main():
         logger.info("Starting Twitter Sentiment Analysis system")
         
         # Load Twitter accounts
-        accounts = load_twitter_accounts(settings.accounts_file)
+        accounts = load_twitter_accounts(settings['accounts_file'])
         if not accounts:
-            logger.error(f"No Twitter accounts found in {settings.accounts_file}")
+            logger.error(f"No Twitter accounts found in {settings['accounts_file']}")
             return 1
         
         # Initialize components
         monitor = TwitterMonitor(
-            api_key=settings.twitterapi_key,
+            api_key=settings['twitterapi_key'],
             accounts=accounts,
-            crypto_keywords=settings.target_keywords
+            crypto_keywords=settings['target_keywords']
         )
         
         analyzer = SentimentAnalyzer(
-            openai_api_key=settings.openai_api_key,
-            model=settings.openai_model
+            openai_api_key=settings['openai_api_key'],
+            model=settings['openai_model']
         )
         
         storage = WeaviateStorage(
-            weaviate_url=settings.weaviate_url,
-            openai_api_key=settings.openai_api_key
+            weaviate_url=settings['weaviate_url'],
+            openai_api_key=settings['openai_api_key']
         )
         
         notifier = NotificationService(
-            telegram_token=settings.telegram_token,
-            telegram_chat_id=settings.telegram_chat_id,
-            notification_method=settings.notification_method
+            telegram_token=settings['telegram_token'],
+            telegram_chat_id=settings['telegram_chat_id'],
+            notification_method=settings['notification_method']
         )
         
         # Create and start scheduler
@@ -159,11 +179,11 @@ def main():
             analyzer=analyzer,
             storage=storage,
             notifier=notifier,
-            keywords=settings.target_keywords
+            keywords=settings['target_keywords']
         )
         
         try:
-            scheduler.start(interval_seconds=settings.monitoring_interval)
+            scheduler.start(interval_seconds=settings['monitoring_interval'])
             
             # Keep the application running
             logger.info("Application running. Press Ctrl+C to exit.")
